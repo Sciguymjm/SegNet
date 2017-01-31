@@ -1,17 +1,17 @@
 import math
+import os
 from os import listdir
 from os.path import isfile, join
 
 import numpy as np
 import tensorflow as tf
-from scipy import misc
 from tensorflow.python.framework import ops, dtypes
 from tensorflow.python.ops import gen_nn_ops
 
 IMAGE_HEIGHT = 360
 IMAGE_WIDTH = 480
 IMAGE_DEPTH = 3
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 
 
 @ops.RegisterGradient("MaxPoolWithArgmax")
@@ -148,7 +148,8 @@ def loss(logits, labels):
         epsilon = tf.constant(value=1e-10)
         logits = tf.add(logits, epsilon)
         label_flat = tf.reshape(labels, (-1, 1))
-        labels = tf.reshape(tf.one_hot(label_flat, depth=32), (-1, 32))
+        with tf.device("/cpu:0"):
+            labels = tf.reshape(tf.one_hot(label_flat, depth=32), (-1, 32))
         softmax = tf.nn.softmax(logits)
         cross_entropy = -tf.reduce_sum(labels * tf.log(softmax + epsilon), reduction_indices=[1])
         cross_entropy_mean = tf.reduce_mean(cross_entropy, name="cross_entropy")
@@ -160,14 +161,14 @@ def loss(logits, labels):
 
 def generate_batch(image, label, min_ex, batch_size, shuffle):
     if shuffle:
-        images, label_batch = tf.train.shuffle_batch([image, label],
-                                                     batch_size=batch_size, num_threads=1,
-                                                     capacity=min_ex + 3 * batch_size,
-                                                     min_after_dequeue=min_ex)
+        imgs, label_batch = tf.train.shuffle_batch([image, label],
+                                                   batch_size=batch_size, num_threads=1,
+                                                   capacity=min_ex + 3 * batch_size,
+                                                   min_after_dequeue=min_ex)
     else:
-        images, label_batch = tf.train.batch([image, label], batch_size=batch_size, num_threads=1,
-                                             capacity=min_ex + 3 * batch_size)
-    return images, label_batch
+        imgs, label_batch = tf.train.batch([image, label], batch_size=batch_size, num_threads=1,
+                                           capacity=min_ex + 3 * batch_size)
+    return imgs, label_batch
 
 
 def reader(queue):
@@ -186,65 +187,65 @@ def CamVid(images, labels, batch_size):
     img = ops.convert_to_tensor(images, dtype=dtypes.string)
     lbl = ops.convert_to_tensor(labels, dtype=dtypes.string)
 
-    queue = tf.train.slice_input_producer([images, labels], shuffle=True)
+    queue = tf.train.slice_input_producer([img, lbl], shuffle=True)
     image, label = reader(queue)
     reshaped = tf.cast(image, tf.float32)
-    min_ex = int(0.4 * 367)
+    min_ex = int(0.2 * 367)
     return generate_batch(reshaped, label, min_ex, batch_size, shuffle=True)
 
 
 def main(imageN, labelN):
     global_step = tf.Variable(0, trainable=False)
-    with tf.device('/gpu:0'):
-        x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3])
-        y_ = tf.placeholder(tf.int32, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1])
+    imgs, labels = CamVid(imageN, labelN, BATCH_SIZE)
 
-        pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64])
-        pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64])
-        pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64])
-        pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64])
+    x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3])
+    y_ = tf.placeholder(tf.int32, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1])
 
-        up4 = deconv_layer(pool4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, 64], name="up4")
-        de4 = conv_layer_with_bias(up4, [7, 7, 64, 64])
-        up3 = deconv_layer(de4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, 64], name="up3")
-        de3 = conv_layer_with_bias(up3, [7, 7, 64, 64])
-        up2 = deconv_layer(de3, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, 64], name="up2")
-        de2 = conv_layer_with_bias(up2, [7, 7, 64, 64])
-        up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
-        de1 = conv_layer_with_bias(up1, [7, 7, 64, 64])
-        kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
-        conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME')
-        biases = bias_variable([32])
-        conv_classifier = tf.nn.bias_add(conv, biases)
-        cross_entropy = tf.reduce_mean(loss(conv_classifier, y_))
-        opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cross_entropy)
-        print("Done setting up graph.")
+    pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64])
+    pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64])
+    pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64])
+    pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64])
+
+    up4 = deconv_layer(pool4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, 64], name="up4")
+    de4 = conv_layer_with_bias(up4, [7, 7, 64, 64])
+    up3 = deconv_layer(de4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, 64], name="up3")
+    de3 = conv_layer_with_bias(up3, [7, 7, 64, 64])
+    up2 = deconv_layer(de3, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, 64], name="up2")
+    de2 = conv_layer_with_bias(up2, [7, 7, 64, 64])
+    up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
+    de1 = conv_layer_with_bias(up1, [7, 7, 64, 64])
+    kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
+    conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME')
+    biases = bias_variable([32])
+    conv_classifier = tf.nn.bias_add(conv, biases)
+    cross_entropy = tf.reduce_mean(loss(conv_classifier, y_))
+    opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cross_entropy, global_step)
+    print("Done setting up graph.")
+    saver = tf.train.Saver(tf.global_variables())
     with tf.Session() as sess:
-        with tf.device("/cpu:0"):
-            init = tf.global_variables_initializer()
-            sess.run(init)
-            imgs, labels = CamVid(imageN, labelN, BATCH_SIZE)
+        print("Step")
+        init = tf.global_variables_initializer()
+        print("1")
+        sess.run(init)
+        coord = tf.train.Coordinator()
+        threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+        for step in range(MAX_STEPS):
             imageB, labelB = sess.run([imgs, labels])
-        with tf.device("/gpu:0"):
-            for step in range(10):
-                feed = {x: imageB, y_: labelB}
-                _, closs = opt.run(feed_dict=feed)
-                print(_ + " | Loss: " + closs)
+            feed = {x: imageB, y_: labelB}
+            _, l = sess.run([opt, cross_entropy], feed_dict=feed)
+            print (step, l)
+            if step % 500 == 0:
+                saver.save(sess, os.path.join(os.curdir, 'model.ckpt'), global_step=global_step)
+        coord.request_stop()
+        coord.join(threads)
 
-
+MAX_STEPS = 10000
 NUM_CLASSES = 32
-LEARNING_RATE = 0.5
+LEARNING_RATE = 0.1
 
 if __name__ == "__main__":
     train = "CamVid/train/"
     annot = "CamVid/trainannot/"
-    # images = np.array([misc.imread(train + f) for f in listdir(train) if isfile(join(train, f))], dtype=np.int8)
-    # labels = np.array([misc.imread(annot + f) for f in listdir(annot) if isfile(join(annot, f))], dtype=np.int8)
-    # annotated = np.zeros((images.shape[0], 360, 480, 32), dtype=np.int8)
-    # print("Done loading images....")
-    # for i in range(images.shape[0]):
-    #     # convert to one-hot vector
-    #     annotated[i] = np.eye(32)[labels[i]]
-    images = [train+f for f in listdir(train) if isfile(join(train, f))]
-    annotated = [annot+f for f in listdir(annot) if isfile(join(annot, f))]
+    images = [train + f for f in listdir(train) if isfile(join(train, f))]
+    annotated = [annot + f for f in listdir(annot) if isfile(join(annot, f))]
     main(images, annotated)
