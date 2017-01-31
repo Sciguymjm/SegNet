@@ -1,5 +1,4 @@
 import math
-import pickle
 from os import listdir
 from os.path import isfile, join
 
@@ -8,6 +7,8 @@ import tensorflow as tf
 from scipy import misc
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import gen_nn_ops
+
+from multiprocessing import Pool
 
 
 @ops.RegisterGradient("MaxPoolWithArgmax")
@@ -153,6 +154,7 @@ def loss(logits, labels):
 
     return loss
 
+
 def main(images, labels):
     global_step = tf.Variable(0, trainable=False)
     x = tf.placeholder(tf.float32, [None, 720, 960, 3])
@@ -186,45 +188,21 @@ def main(images, labels):
             print(_ + " | Loss: " + closs)
 
 
-
 BATCH_SIZE = 1
 NUM_CLASSES = 32
 LEARNING_RATE = 0.5
 IMAGE_DEPTH = 3
 
 
-
-
 if __name__ == "__main__":
-    mypath = "data/"
-    labels = []
-    images = []
-    onlyfiles = [f for f in listdir(mypath) if isfile(join(mypath, f))]
-    for name in onlyfiles:
-        if name.endswith("L.png"):
-            labels.append(misc.imread(mypath + name))
-        elif name.endswith(".png"):
-            images.append(misc.imread(mypath + name))
-    images = np.array(images, dtype=np.int32)
-    labels = np.array(labels, dtype=np.int32)
+    train = "CamVid/train/"
+    annot = "CamVid/trainannot/"
+    images = np.array([misc.imread(train+f) for f in listdir(train) if isfile(join(train, f))])
+    labels = np.array([misc.imread(annot+f) for f in listdir(annot) if isfile(join(annot, f))])
 
-    ltxt = open("data/label_colors.txt")
-    ls = []
-    for line in ltxt:
-        ls.append([int(n) for n in line.split("\t")[0].split(" ")])
-    labs = np.zeros((100, 720, 960, 32), dtype=np.int32)
-    if isfile("data.pickle"):
-        with open("data.pickle", "a") as f:
-            labs = pickle.load(f)
-    else:
-        for i in range(100):
-            print(i)
-            for x in range(960):
-                for y in range(720):
-                    truth = [np.array_equal(labels[i, y, x], l) for l in ls]
-                    if any(truth):
-                        labs[i, y, x, truth.index(True)] = 1
-        with open('data.pickle', 'a') as f:
-            pickle.dump(labs, f)
+    # convert to one-hot vector
+    images = np.eye(32)[labels]
+    print (images.shape)
+    exit()
     with tf.device('/gpu:0'):
         main(images, labels)
