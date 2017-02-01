@@ -32,51 +32,14 @@ def unravel_argmax(argmax, shape):
     return tf.pack(output_list)
 
 
-def unpool_layer2x2_batch(bottom, argmax):
-    bottom_shape = tf.shape(bottom)
-    top_shape = [bottom_shape[0], bottom_shape[1] * 2, bottom_shape[2] * 2, bottom_shape[3]]
-
-    batch_size = top_shape[0]
-    height = top_shape[1]
-    width = top_shape[2]
-    channels = top_shape[3]
-
-    argmax_shape = tf.to_int64([batch_size, height, width, channels])
-    argmax = unravel_argmax(argmax, argmax_shape)
-
-    t1 = tf.to_int64(tf.range(channels))
-    t1 = tf.tile(t1, [batch_size * (width // 2) * (height // 2)])
-    t1 = tf.reshape(t1, [-1, channels])
-    t1 = tf.transpose(t1, perm=[1, 0])
-    t1 = tf.reshape(t1, [channels, batch_size, height // 2, width // 2, 1])
-    t1 = tf.transpose(t1, perm=[1, 0, 2, 3, 4])
-
-    t2 = tf.to_int64(tf.range(batch_size))
-    t2 = tf.tile(t2, [channels * (width // 2) * (height // 2)])
-    t2 = tf.reshape(t2, [-1, batch_size])
-    t2 = tf.transpose(t2, perm=[1, 0])
-    t2 = tf.reshape(t2, [batch_size, channels, height // 2, width // 2, 1])
-
-    t3 = tf.transpose(argmax, perm=[1, 4, 2, 3, 0])
-
-    t = tf.concat(4, [t2, t3, t1])
-    indices = tf.reshape(t, [(height // 2) * (width // 2) * channels * batch_size, 4])
-
-    x1 = tf.transpose(bottom, perm=[0, 3, 1, 2])
-    values = tf.reshape(x1, [-1])
-
-    delta = tf.SparseTensor(indices, values, tf.to_int64(top_shape))
-    return tf.sparse_tensor_to_dense(tf.sparse_reorder(delta))
-
-
 def weight_variable(shape):
     initial = tf.truncated_normal(shape, stddev=0.1)
     return tf.get_variable(name="weigh", initializer=initial)
 
 
-def bias_variable(shape):
-    initial = tf.constant(0.1, shape=shape)
-    return tf.Variable(initial)
+def bias_variable(shape, name=None):
+    initial = tf.constant(0.0, shape=shape)
+    return tf.Variable(initial_value=initial, name=name)
 
 
 def conv2d(x, W):
@@ -124,9 +87,12 @@ def deconv_layer(inputT, f_shape, output_shape, stride=2, name=None):
 
 def conv_pool_layer_with_bias(input, shape, name=None):
     with tf.variable_scope(name):
-        W = weight_variable(shape)
-        b = bias_variable([shape[3]])
-        conv = tf.nn.relu(conv2d(input, W) + b)
+        kernel = weight_variable(shape)
+        c = tf.nn.conv2d(input, kernel, [1, 1, 1, 1], padding='SAME')
+        biases = bias_variable([shape[3]], name=name + "_biases")
+        bias = tf.nn.bias_add(c, biases)
+        with tf.device('/cpu:0'):
+            conv = tf.nn.relu(tf.contrib.layers.batch_norm(bias, is_training=True, center=False, scope=name + "_bn"))
     return max_pool_2x2_argmax(conv, name=name + "_pool")
 
 
@@ -147,19 +113,19 @@ def msra_initializer(kl, dl):
 
 def loss(logits, labels):
     with tf.name_scope('loss'):
-        logits = tf.reshape(logits, (-1, 32))
+        tf.cast(labels, tf.int32)
+        logits = tf.reshape(logits, (-1, NUM_CLASSES))
         epsilon = tf.constant(value=1e-10, name="epsilon")
         logits = tf.add(logits, epsilon)
+
+        # one hot label
         label_flat = tf.reshape(labels, (-1, 1))
         with tf.device("/cpu:0"):
             labels = tf.reshape(tf.one_hot(label_flat, depth=32), (-1, 32))
         softmax = tf.nn.softmax(logits)
         cross_entropy = -tf.reduce_sum(labels * tf.log(softmax + epsilon), reduction_indices=[1])
         cross_entropy_mean = tf.reduce_mean(cross_entropy, name="cross_entropy")
-        tf.add_to_collection('losses', cross_entropy_mean)
-        l = tf.add_n(tf.get_collection('losses'), name='total_loss')
-
-    return l
+    return cross_entropy_mean
 
 
 def generate_batch(image, label, min_ex, batch_size, shuffle):
@@ -201,10 +167,10 @@ def main(imageN, labelN):
     global_step = tf.Variable(0, trainable=False)
     imgs, labels = CamVid(imageN, labelN, BATCH_SIZE)
     with tf.device('/gpu:0'):
-        x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3])
-        y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1])
-
-        pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64], name="pool1")
+        x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3], name="x")
+        y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1], name="y_")
+        normal = tf.nn.lrn(x, depth_radius=5, bias=1.0, alpha=1e-4, beta=0.75, name="normalize")
+        pool1, pool1_indices = conv_pool_layer_with_bias(normal, [7, 7, IMAGE_DEPTH, 64], name="pool1")
         pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64], name="pool2")
         pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64], name="pool3")
         pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64], name="pool4")
@@ -217,22 +183,25 @@ def main(imageN, labelN):
         de2 = conv_layer_with_bias(up2, [7, 7, 64, 64], name="de2")
         up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
         de1 = conv_layer_with_bias(up1, [7, 7, 64, 64], name="de1")
-        kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
-        conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME')
-        biases = bias_variable([32])
-        conv_classifier = tf.nn.bias_add(conv, biases)
-        cross_entropy = tf.reduce_mean(loss(conv_classifier, y_))
-        opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cross_entropy, global_step)
+        with tf.variable_scope('conv_classifier'):
+            kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
+            conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME', name="conv")
+            biases = bias_variable([32], name="conv_biases")
+            conv_classifier = tf.nn.bias_add(conv, biases, name="conv_classifier")
+            mean_loss = loss(conv_classifier, y_)
+        opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(mean_loss, global_step=global_step)
     # Add histograms for trainable variables.
     for var in tf.trainable_variables():
         tf.histogram_summary(var.op.name, var)
-    correct = tf.equal(tf.argmax(conv, 1), tf.argmax(y_, 1))
+    correct = tf.equal(tf.argmax(tf.slice(conv_classifier, [0, 0, 0, 0], [1, -1, -1, -1]), 3),
+                       tf.argmax(tf.slice(y_, [0, 0, 0, 0], [1, -1, -1, -1]), 3))
     accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
     tf.summary.image('annotated', y_)
+    tf.summary.image('output', tf.cast(tf.reshape(correct, [-1, 360, 480, 1]), tf.uint8) * 255)
     tf.summary.image('input', x)
     tf.summary.scalar('accuracy', accuracy)
     print("Done setting up graph.")
-    tf.summary.scalar('cross_entropy', cross_entropy)
+    tf.summary.scalar('loss', mean_loss)
     tf.summary.histogram('biases', biases)
     saver = tf.train.Saver(tf.global_variables())
     merged = tf.summary.merge_all()
@@ -249,7 +218,7 @@ def main(imageN, labelN):
             for step in range(MAX_STEPS):
                 imageB, labelB = sess.run([imgs, labels])
                 feed = {x: imageB, y_: labelB}
-                _, l, a, summary = sess.run([opt, cross_entropy, accuracy, merged], feed_dict=feed)
+                _, l, a, summary = sess.run([opt, mean_loss, accuracy, merged], feed_dict=feed)
                 print(step, l, a)
                 if step % 10 == 0:
                     train_writer.add_summary(summary, step)
