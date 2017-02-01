@@ -1,5 +1,6 @@
 import math
 import os
+from datetime import datetime
 from os import listdir
 from os.path import isfile, join
 
@@ -129,8 +130,7 @@ def conv_pool_layer_with_bias(input, shape):
 
 def conv_layer_with_bias(input, shape):
     W = weight_variable(shape)
-    b = bias_variable([shape[3]])
-    conv = tf.nn.relu(conv2d(input, W) + b)
+    conv = tf.nn.relu(conv2d(input, W))
     return conv
 
 
@@ -145,7 +145,7 @@ def msra_initializer(kl, dl):
 def loss(logits, labels):
     with tf.name_scope('loss'):
         logits = tf.reshape(logits, (-1, 32))
-        epsilon = tf.constant(value=1e-10)
+        epsilon = tf.constant(value=1e-10, name="epsilon")
         logits = tf.add(logits, epsilon)
         label_flat = tf.reshape(labels, (-1, 1))
         with tf.device("/cpu:0"):
@@ -154,9 +154,9 @@ def loss(logits, labels):
         cross_entropy = -tf.reduce_sum(labels * tf.log(softmax + epsilon), reduction_indices=[1])
         cross_entropy_mean = tf.reduce_mean(cross_entropy, name="cross_entropy")
         tf.add_to_collection('losses', cross_entropy_mean)
-        loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+        l = tf.add_n(tf.get_collection('losses'), name='total_loss')
 
-    return loss
+    return l
 
 
 def generate_batch(image, label, min_ex, batch_size, shuffle):
@@ -197,51 +197,68 @@ def CamVid(images, labels, batch_size):
 def main(imageN, labelN):
     global_step = tf.Variable(0, trainable=False)
     imgs, labels = CamVid(imageN, labelN, BATCH_SIZE)
+    with tf.device('/gpu:0'):
+        x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3])
+        y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1])
 
-    x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3])
-    y_ = tf.placeholder(tf.int32, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1])
+        pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64])
+        pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64])
+        pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64])
+        pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64])
 
-    pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64])
-    pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64])
-    pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64])
-    pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64])
-
-    up4 = deconv_layer(pool4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, 64], name="up4")
-    de4 = conv_layer_with_bias(up4, [7, 7, 64, 64])
-    up3 = deconv_layer(de4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, 64], name="up3")
-    de3 = conv_layer_with_bias(up3, [7, 7, 64, 64])
-    up2 = deconv_layer(de3, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, 64], name="up2")
-    de2 = conv_layer_with_bias(up2, [7, 7, 64, 64])
-    up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
-    de1 = conv_layer_with_bias(up1, [7, 7, 64, 64])
-    kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
-    conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME')
-    biases = bias_variable([32])
-    conv_classifier = tf.nn.bias_add(conv, biases)
-    cross_entropy = tf.reduce_mean(loss(conv_classifier, y_))
-    opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cross_entropy, global_step)
+        up4 = deconv_layer(pool4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, 64], name="up4")
+        de4 = conv_layer_with_bias(up4, [7, 7, 64, 64])
+        up3 = deconv_layer(de4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, 64], name="up3")
+        de3 = conv_layer_with_bias(up3, [7, 7, 64, 64])
+        up2 = deconv_layer(de3, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, 64], name="up2")
+        de2 = conv_layer_with_bias(up2, [7, 7, 64, 64])
+        up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
+        de1 = conv_layer_with_bias(up1, [7, 7, 64, 64])
+        kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
+        conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME')
+        biases = bias_variable([32])
+        conv_classifier = tf.nn.bias_add(conv, biases)
+        cross_entropy = tf.reduce_mean(loss(conv_classifier, y_))
+        opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(cross_entropy, global_step)
+    # Add histograms for trainable variables.
+    for var in tf.trainable_variables():
+        tf.histogram_summary(var.op.name, var)
+    correct = tf.equal(tf.argmax(conv, 1), tf.argmax(y_, 1))
+    accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
+    tf.summary.image('annotated', y_)
+    tf.summary.image('input', x)
+    tf.summary.scalar('accuracy', accuracy)
     print("Done setting up graph.")
+    tf.summary.scalar('cross_entropy', cross_entropy)
+    tf.summary.histogram('biases', biases)
     saver = tf.train.Saver(tf.global_variables())
-    with tf.Session() as sess:
-        print("Step")
-        init = tf.global_variables_initializer()
-        print("1")
-        sess.run(init)
-        coord = tf.train.Coordinator()
-        threads = tf.train.start_queue_runners(sess=sess, coord=coord)
-        for step in range(MAX_STEPS):
-            imageB, labelB = sess.run([imgs, labels])
-            feed = {x: imageB, y_: labelB}
-            _, l = sess.run([opt, cross_entropy], feed_dict=feed)
-            print (step, l)
-            if step % 500 == 0:
-                saver.save(sess, os.path.join(os.curdir, 'model.ckpt'), global_step=global_step)
-        coord.request_stop()
-        coord.join(threads)
+    merged = tf.summary.merge_all()
+    now = datetime.now()
+    with tf.device('/gpu:0'):
+        with tf.Session() as sess:
+            train_writer = tf.summary.FileWriter('train/' + now.strftime("%Y%m%d-%H%M%S") + "/", sess.graph)
+            test_writer = tf.summary.FileWriter('test')
+            print("Step")
+            init = tf.global_variables_initializer()
+            sess.run(init)
+            coord = tf.train.Coordinator()
+            threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+            for step in range(MAX_STEPS):
+                imageB, labelB = sess.run([imgs, labels])
+                feed = {x: imageB, y_: labelB}
+                _, l, a, summary = sess.run([opt, cross_entropy, accuracy, merged], feed_dict=feed)
+                print(step, l, a)
+                if step % 10 == 0:
+                    train_writer.add_summary(summary, step)
+                if step % 500 == 0:
+                    saver.save(sess, os.path.join(os.curdir, 'model.ckpt'), global_step=global_step)
+            coord.request_stop()
+            coord.join(threads)
+
 
 MAX_STEPS = 10000
 NUM_CLASSES = 32
-LEARNING_RATE = 0.1
+LEARNING_RATE = 1e-3
 
 if __name__ == "__main__":
     train = "CamVid/train/"

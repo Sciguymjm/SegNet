@@ -106,3 +106,4 @@ docs/_build/
 target/
 
 # Created by .ignore support plugin (hsz.mobi)
+model*
