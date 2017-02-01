@@ -71,7 +71,7 @@ def unpool_layer2x2_batch(bottom, argmax):
 
 def weight_variable(shape):
     initial = tf.truncated_normal(shape, stddev=0.1)
-    return tf.Variable(initial)
+    return tf.get_variable(name="weigh", initializer=initial)
 
 
 def bias_variable(shape):
@@ -83,10 +83,11 @@ def conv2d(x, W):
     return tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='SAME')
 
 
-def max_pool_2x2_argmax(x):
+def max_pool_2x2_argmax(x, name):
     with tf.device('/gpu:0'):
-        return tf.nn.max_pool_with_argmax(x, ksize=[1, 2, 2, 1],
-                                          strides=[1, 2, 2, 1], padding='SAME')
+        with tf.variable_scope(name):
+            return tf.nn.max_pool_with_argmax(x, ksize=[1, 2, 2, 1],
+                                              strides=[1, 2, 2, 1], padding='SAME')
 
 
 def get_deconv_filter(f_shape):
@@ -121,16 +122,18 @@ def deconv_layer(inputT, f_shape, output_shape, stride=2, name=None):
     return deconv
 
 
-def conv_pool_layer_with_bias(input, shape):
-    W = weight_variable(shape)
-    b = bias_variable([shape[3]])
-    conv = tf.nn.relu(conv2d(input, W) + b)
-    return max_pool_2x2_argmax(conv)
+def conv_pool_layer_with_bias(input, shape, name=None):
+    with tf.variable_scope(name):
+        W = weight_variable(shape)
+        b = bias_variable([shape[3]])
+        conv = tf.nn.relu(conv2d(input, W) + b)
+    return max_pool_2x2_argmax(conv, name=name + "_pool")
 
 
-def conv_layer_with_bias(input, shape):
-    W = weight_variable(shape)
-    conv = tf.nn.relu(conv2d(input, W))
+def conv_layer_with_bias(input, shape, name=None):
+    with tf.variable_scope(name):
+        W = weight_variable(shape)
+        conv = tf.nn.relu(conv2d(input, W))
     return conv
 
 
@@ -190,7 +193,7 @@ def CamVid(images, labels, batch_size):
     queue = tf.train.slice_input_producer([img, lbl], shuffle=True)
     image, label = reader(queue)
     reshaped = tf.cast(image, tf.float32)
-    min_ex = int(0.2 * 367)
+    min_ex = int(0.4 * 367)
     return generate_batch(reshaped, label, min_ex, batch_size, shuffle=True)
 
 
@@ -201,19 +204,19 @@ def main(imageN, labelN):
         x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3])
         y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1])
 
-        pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64])
-        pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64])
-        pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64])
-        pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64])
+        pool1, pool1_indices = conv_pool_layer_with_bias(x, [7, 7, IMAGE_DEPTH, 64], name="pool1")
+        pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64], name="pool2")
+        pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64], name="pool3")
+        pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64], name="pool4")
 
         up4 = deconv_layer(pool4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, 64], name="up4")
-        de4 = conv_layer_with_bias(up4, [7, 7, 64, 64])
+        de4 = conv_layer_with_bias(up4, [7, 7, 64, 64], name="de4")
         up3 = deconv_layer(de4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, 64], name="up3")
-        de3 = conv_layer_with_bias(up3, [7, 7, 64, 64])
+        de3 = conv_layer_with_bias(up3, [7, 7, 64, 64], name="de3")
         up2 = deconv_layer(de3, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, 64], name="up2")
-        de2 = conv_layer_with_bias(up2, [7, 7, 64, 64])
+        de2 = conv_layer_with_bias(up2, [7, 7, 64, 64], name="de2")
         up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
-        de1 = conv_layer_with_bias(up1, [7, 7, 64, 64])
+        de1 = conv_layer_with_bias(up1, [7, 7, 64, 64], name="de1")
         kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
         conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME')
         biases = bias_variable([32])
@@ -265,4 +268,5 @@ if __name__ == "__main__":
     annot = "CamVid/trainannot/"
     images = [train + f for f in listdir(train) if isfile(join(train, f))]
     annotated = [annot + f for f in listdir(annot) if isfile(join(annot, f))]
+    assert (images[0][:10] == annotated[0][:10])
     main(images, annotated)
