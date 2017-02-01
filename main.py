@@ -26,12 +26,6 @@ def _MaxPoolWithArgmaxGrad(op, grad, unused_argmax_grad):
                                      data_format='NHWC')
 
 
-def unravel_argmax(argmax, shape):
-    output_list = [argmax // (shape[2] * shape[3]),
-                   argmax % (shape[2] * shape[3]) // shape[3]]
-    return tf.pack(output_list)
-
-
 def weight_variable(shape):
     initial = tf.truncated_normal(shape, stddev=0.1)
     return tf.get_variable(name="weigh", initializer=initial)
@@ -197,12 +191,17 @@ def main(imageN, labelN):
     # Add histograms for trainable variables.
     for var in tf.trainable_variables():
         tf.histogram_summary(var.op.name, var)
-    correct = tf.equal(tf.argmax(tf.slice(conv_classifier, [0, 0, 0, 0], [1, -1, -1, -1]), 3),
-                       tf.argmax(tf.slice(y_, [0, 0, 0, 0], [1, -1, -1, -1]), 3))
+    correct = tf.equal(
+        tf.reshape(tf.argmax(tf.slice(conv_classifier, [0, 0, 0, 0], [1, -1, -1, -1]), 3), [-1, 360, 480, 1]),
+        tf.cast(tf.slice(y_, [0, 0, 0, 0], [1, -1, -1, -1]), tf.int64))
     accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
     tf.summary.image('annotated', y_)
-    tf.summary.image('output', tf.cast(tf.reshape(correct, [-1, 360, 480, 1]), tf.uint8) * 255)
+    tf.summary.image('correct', tf.cast(tf.reshape(correct, [-1, 360, 480, 1]), tf.uint8) * 255)
     tf.summary.image('input', x)
+    tf.summary.image('output',
+                     tf.cast(tf.reshape(tf.argmax(tf.slice(conv_classifier, [0, 0, 0, 0], [1, -1, -1, -1]), 3),
+                                        [-1, 360, 480, 1]),
+                             tf.uint8) * 7)
     tf.summary.scalar('accuracy', accuracy)
     print("Done setting up graph.")
     tf.summary.scalar('loss', mean_loss)
@@ -234,7 +233,7 @@ def main(imageN, labelN):
 
 MAX_STEPS = 10000
 NUM_CLASSES = 32
-LEARNING_RATE = 1e-2
+LEARNING_RATE = 1e-3
 
 if __name__ == "__main__":
     train = "CamVid/train/"
