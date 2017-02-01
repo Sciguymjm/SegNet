@@ -98,8 +98,12 @@ def conv_pool_layer_with_bias(input, shape, name=None):
 
 def conv_layer_with_bias(input, shape, name=None):
     with tf.variable_scope(name):
-        W = weight_variable(shape)
-        conv = tf.nn.relu(conv2d(input, W))
+        kernel = weight_variable(shape)
+        c = tf.nn.conv2d(input, kernel, [1, 1, 1, 1], padding='SAME')
+        biases = bias_variable([shape[3]], name=name + "_biases")
+        bias = tf.nn.bias_add(c, biases)
+        conv = tf.contrib.layers.batch_norm(bias, is_training=True, center=False, scope=name + "_bn")
+
     return conv
 
 
@@ -230,7 +234,7 @@ def main(imageN, labelN):
 
 MAX_STEPS = 10000
 NUM_CLASSES = 32
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-2
 
 if __name__ == "__main__":
     train = "CamVid/train/"
