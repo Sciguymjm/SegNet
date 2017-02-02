@@ -264,7 +264,7 @@ if __name__ == "__main__":
     parser.add_argument("-lr", type=float, default=LEARNING_RATE, help="Learning rate")
     parser.add_argument("-max", type=int, default=MAX_STEPS, help="Max number of steps to take")
     args = parser.parse_args()
-    if not args.train:
+    if args.train:
         train = "CamVid/train/"
         annot = "CamVid/trainannot/"
         images = [train + f for f in listdir(train) if isfile(join(train, f))]
