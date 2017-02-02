@@ -1,3 +1,4 @@
+import argparse
 import math
 import os
 from datetime import datetime
@@ -79,24 +80,24 @@ def deconv_layer(inputT, f_shape, output_shape, stride=2, name=None):
     return deconv
 
 
-def conv_pool_layer_with_bias(input, shape, name=None):
+def conv_pool_layer_with_bias(input, shape, name=None, is_training=True):
     with tf.variable_scope(name):
         kernel = weight_variable(shape)
         c = tf.nn.conv2d(input, kernel, [1, 1, 1, 1], padding='SAME')
         biases = bias_variable([shape[3]], name=name + "_biases")
         bias = tf.nn.bias_add(c, biases)
         with tf.device('/cpu:0'):
-            conv = tf.nn.relu(tf.contrib.layers.batch_norm(bias, is_training=True, center=False, scope=name + "_bn"))
+            conv = tf.nn.relu(tf.contrib.layers.batch_norm(bias, is_training=is_training, center=False, scope=name + "_bn"))
     return max_pool_2x2_argmax(conv, name=name + "_pool")
 
 
-def conv_layer_with_bias(input, shape, name=None):
+def conv_layer_with_bias(input, shape, name=None, is_training=True):
     with tf.variable_scope(name):
         kernel = weight_variable(shape)
         c = tf.nn.conv2d(input, kernel, [1, 1, 1, 1], padding='SAME')
         biases = bias_variable([shape[3]], name=name + "_biases")
         bias = tf.nn.bias_add(c, biases)
-        conv = tf.contrib.layers.batch_norm(bias, is_training=True, center=False, scope=name + "_bn")
+        conv = tf.contrib.layers.batch_norm(bias, is_training=is_training, center=False, scope=name + "_bn")
 
     return conv
 
@@ -161,33 +162,33 @@ def CamVid(images, labels, batch_size):
     return generate_batch(reshaped, label, min_ex, batch_size, shuffle=True)
 
 
-def main(imageN, labelN):
+def main(imageN, labelN, args):
     global_step = tf.Variable(0, trainable=False)
     imgs, labels = CamVid(imageN, labelN, BATCH_SIZE)
     with tf.device('/gpu:0'):
         x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3], name="x")
         y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1], name="y_")
         normal = tf.nn.lrn(x, depth_radius=5, bias=1.0, alpha=1e-4, beta=0.75, name="normalize")
-        pool1, pool1_indices = conv_pool_layer_with_bias(normal, [7, 7, IMAGE_DEPTH, 64], name="pool1")
-        pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64], name="pool2")
-        pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64], name="pool3")
-        pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64], name="pool4")
+        pool1, pool1_indices = conv_pool_layer_with_bias(normal, [7, 7, IMAGE_DEPTH, 64], name="pool1", is_training=args.train)
+        pool2, pool2_indices = conv_pool_layer_with_bias(pool1, [7, 7, 64, 64], name="pool2", is_training=args.train)
+        pool3, pool3_indices = conv_pool_layer_with_bias(pool2, [7, 7, 64, 64], name="pool3", is_training=args.train)
+        pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, 64, 64], name="pool4", is_training=args.train)
 
         up4 = deconv_layer(pool4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, 64], name="up4")
-        de4 = conv_layer_with_bias(up4, [7, 7, 64, 64], name="de4")
+        de4 = conv_layer_with_bias(up4, [7, 7, 64, 64], name="de4", is_training=args.train)
         up3 = deconv_layer(de4, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, 64], name="up3")
-        de3 = conv_layer_with_bias(up3, [7, 7, 64, 64], name="de3")
+        de3 = conv_layer_with_bias(up3, [7, 7, 64, 64], name="de3", is_training=args.train)
         up2 = deconv_layer(de3, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, 64], name="up2")
-        de2 = conv_layer_with_bias(up2, [7, 7, 64, 64], name="de2")
+        de2 = conv_layer_with_bias(up2, [7, 7, 64, 64], name="de2", is_training=args.train)
         up1 = deconv_layer(de2, [2, 2, 64, 64], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, 64], name="up1")
-        de1 = conv_layer_with_bias(up1, [7, 7, 64, 64], name="de1")
+        de1 = conv_layer_with_bias(up1, [7, 7, 64, 64], name="de1", is_training=args.train)
         with tf.variable_scope('conv_classifier'):
             kernel = tf.get_variable('weights', [1, 1, 64, 32], initializer=msra_initializer(1, 64))
             conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME', name="conv")
             biases = bias_variable([32], name="conv_biases")
             conv_classifier = tf.nn.bias_add(conv, biases, name="conv_classifier")
             mean_loss = loss(conv_classifier, y_)
-        opt = tf.train.AdamOptimizer(LEARNING_RATE).minimize(mean_loss, global_step=global_step)
+        opt = tf.train.AdamOptimizer(args.lr).minimize(mean_loss, global_step=global_step)
     # Add histograms for trainable variables.
     for var in tf.trainable_variables():
         tf.histogram_summary(var.op.name, var)
@@ -216,29 +217,62 @@ def main(imageN, labelN):
             print("Step")
             init = tf.global_variables_initializer()
             sess.run(init)
-            coord = tf.train.Coordinator()
-            threads = tf.train.start_queue_runners(sess=sess, coord=coord)
-            for step in range(MAX_STEPS):
-                imageB, labelB = sess.run([imgs, labels])
-                feed = {x: imageB, y_: labelB}
-                _, l, a, summary = sess.run([opt, mean_loss, accuracy, merged], feed_dict=feed)
-                print(step, l, a)
-                if step % 10 == 0:
-                    train_writer.add_summary(summary, step)
-                if step % 500 == 0:
-                    saver.save(sess, os.path.join(os.curdir, 'model.ckpt'), global_step=global_step)
+
+            if args.train:
+
+
+                coord = tf.train.Coordinator()
+                threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+                for step in range(args.max):
+                    imageB, labelB = sess.run([imgs, labels])
+                    feed = {x: imageB, y_: labelB}
+                    _, l, a, summary = sess.run([opt, mean_loss, accuracy, merged], feed_dict=feed)
+                    print(step, l, a)
+                    if step % 10 == 0:
+                        train_writer.add_summary(summary, step)
+                    if step % 500 == 0 or (step + 1) == args.max:
+                        saver.save(sess, join(os.curdir, 'model.ckpt'), global_step=global_step)
+            else:
+                ckpt = tf.train.get_checkpoint_state(os.curdir)
+                if ckpt and ckpt.model_checkpoint_path:
+                    print(ckpt.model_checkpoint_path)
+                    saver.restore(sess, ckpt.model_checkpoint_path)
+                else:
+                    print("No checkpoint found! Please specify using the argument -ckpt")
+                    return
+                coord = tf.train.Coordinator()
+                threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+                for step in range(args.max):
+                    imageB, labelB = sess.run([imgs, labels])
+                    feed = {x: imageB, y_: labelB}
+                    logits, l, a, summary = sess.run([conv_classifier, mean_loss, accuracy, merged], feed_dict=feed)
+                    print(step, l, a)
+                    if step % 10 == 0:
+                        test_writer.add_summary(summary, step)
+
             coord.request_stop()
             coord.join(threads)
 
 
-MAX_STEPS = 10000
+MAX_STEPS = 30000
 NUM_CLASSES = 32
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 1e-4
 
 if __name__ == "__main__":
-    train = "CamVid/train/"
-    annot = "CamVid/trainannot/"
-    images = [train + f for f in listdir(train) if isfile(join(train, f))]
-    annotated = [annot + f for f in listdir(annot) if isfile(join(annot, f))]
-    assert (images[0][:10] == annotated[0][:10])
-    main(images, annotated)
+    parser = argparse.ArgumentParser(description="SegNet in Tensorflow.")
+    parser.add_argument("--train", action="store_true", help="Train a new model")
+    parser.add_argument("-lr", type=float, default=LEARNING_RATE, help="Learning rate")
+    parser.add_argument("-max", type=int, default=MAX_STEPS, help="Max number of steps to take")
+    args = parser.parse_args()
+    if not args.train:
+        train = "CamVid/train/"
+        annot = "CamVid/trainannot/"
+        images = [train + f for f in listdir(train) if isfile(join(train, f))]
+        annotated = [annot + f for f in listdir(annot) if isfile(join(annot, f))]
+        assert (images[0][:10] == annotated[0][:10])
+    else:
+        test = "CamVid/test/"
+        annot = "CamVid/testannot/"
+        images = [test + f for f in listdir(test) if isfile(join(test, f))]
+        annotated = [annot + f for f in listdir(annot) if isfile(join(annot, f))]
+    main(images, annotated, args)
