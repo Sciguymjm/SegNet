@@ -7,4 +7,5 @@ Requires:
 scipy
 numpy
 tensorflow-gpu
+Pillow
 ```

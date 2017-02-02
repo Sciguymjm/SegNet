@@ -107,3 +107,6 @@ target/
 
 # Created by .ignore support plugin (hsz.mobi)
 model*
+./train/
+./test/
+checkpoint
