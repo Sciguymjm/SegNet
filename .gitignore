@@ -110,4 +110,3 @@ model*
 train/
 test/
 checkpoint
-CamVid/
