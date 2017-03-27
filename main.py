@@ -181,13 +181,14 @@ def load_names(train=True):
         annot = "CamVid/testannot/"
         images = [test_dir + f for f in listdir(test_dir) if isfile(join(test_dir, f))]
         annotated = [annot + f for f in listdir(annot) if isfile(join(annot, f))]
+    print("Done loading images...")
     assert (images[0][:10] == annotated[0][:10])
     return images, annotated
 
 
-def setup(args, filter_size=16):
+def setup(args, filter_size=32):
     x = tf.placeholder(tf.float32, [None, IMAGE_HEIGHT, IMAGE_WIDTH, 3], name="x")
-    y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 1], name="y_")
+    y_ = tf.placeholder(tf.uint8, shape=[None, IMAGE_HEIGHT, IMAGE_WIDTH, 3], name="y_")
     normal = tf.nn.lrn(x, depth_radius=5, bias=1.0, alpha=1e-4, beta=0.75, name="normalize")
     pool1, pool1_indices = conv_pool_layer_with_bias(normal, [7, 7, IMAGE_DEPTH, filter_size], name="pool1",
                                                      is_training=args.train)
@@ -198,25 +199,29 @@ def setup(args, filter_size=16):
     pool4, pool4_indices = conv_pool_layer_with_bias(pool3, [7, 7, filter_size, filter_size], name="pool4",
                                                      is_training=args.train)
 
-    up4 = deconv_layer(pool4, [2, 2, filter_size, filter_size], [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, filter_size],
+    up4 = deconv_layer(pool4, [2, 2, filter_size, filter_size],
+                       [BATCH_SIZE, IMAGE_HEIGHT // 8, IMAGE_WIDTH // 8, filter_size],
                        name="up4")
     de4 = conv_layer_with_bias(up4, [7, 7, filter_size, filter_size], name="de4", is_training=args.train)
-    up3 = deconv_layer(de4, [2, 2, filter_size, filter_size], [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, filter_size],
+    up3 = deconv_layer(de4, [2, 2, filter_size, filter_size],
+                       [BATCH_SIZE, IMAGE_HEIGHT // 4, IMAGE_WIDTH // 4, filter_size],
                        name="up3")
     de3 = conv_layer_with_bias(up3, [7, 7, filter_size, filter_size], name="de3", is_training=args.train)
-    up2 = deconv_layer(de3, [2, 2, filter_size, filter_size], [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, filter_size],
+    up2 = deconv_layer(de3, [2, 2, filter_size, filter_size],
+                       [BATCH_SIZE, IMAGE_HEIGHT // 2, IMAGE_WIDTH // 2, filter_size],
                        name="up2")
     de2 = conv_layer_with_bias(up2, [7, 7, filter_size, filter_size], name="de2", is_training=args.train)
-    up1 = deconv_layer(de2, [2, 2, filter_size, filter_size], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, filter_size], name="up1")
+    up1 = deconv_layer(de2, [2, 2, filter_size, filter_size], [BATCH_SIZE, IMAGE_HEIGHT, IMAGE_WIDTH, filter_size],
+                       name="up1")
     de1 = conv_layer_with_bias(up1, [7, 7, filter_size, filter_size], name="de1", is_training=args.train)
     with tf.variable_scope('conv_classifier'):
-        kernel = tf.get_variable('weights', [1, 1, filter_size, 32], initializer=msra_initializer(1, 64))
+        kernel = tf.get_variable('weights', [1, 1, filter_size, 3], initializer=msra_initializer(1, 64))
         conv = tf.nn.conv2d(de1, kernel, [1, 1, 1, 1], padding='SAME', name="conv")
-        biases = bias_variable([32], name="conv_biases")
+        biases = bias_variable([3, 1], name="conv_biases")
         conv_classifier = tf.nn.bias_add(conv, biases, name="conv_classifier")
-        classifier = tf.nn.softmax(conv_classifier)
-        mean_loss = loss(classifier, y_)
-    return x, y_, classifier, mean_loss
+        # classifier = tf.nn.softmax(conv_classifier)
+        mean_loss = loss(conv_classifier, y_)
+    return x, y_, conv_classifier, mean_loss
 
 
 def test(args, global_step):
@@ -279,7 +284,7 @@ def train(args, global_step):
         tf.summary.scalar('accuracy', accuracy)
         tf.summary.scalar('loss', mean_loss)
 
-    LOG_DIR = 'train/' + datetime.now().strftime("%Y%m%d-%H%M%S") + "/"
+    LOG_DIR = 'train/' + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + str(args.max) + "/"
 
     print("Done setting up graph.")
     with tf.device('/cpu:0'):
@@ -300,6 +305,18 @@ def train(args, global_step):
             print(step, l, a)
             if step % 10 == 0:
                 train_writer.add_summary(summary, step)
+            if step > 50 and step % 100 == 0:
+                # do testing
+                print("Testing")
+
+                with tf.device("/cpu:0"):
+                    images, annotated = load_names(train=False)
+                    inp, out = CamVid(images, annotated, batch_size=BATCH_SIZE)
+                    testI, testL = sess.run([inp, out])
+                print("Done processing images")
+                feed = {x: testI, y_: testL}
+                _, lo, acc = sess.run([train_op, mean_loss, accuracy], feed_dict=feed)
+                print(lo, acc)
             if step % 500 == 0 or (step + 1) == args.max:
                 saver.save(sess, join(LOG_DIR, 'model.ckpt'), global_step=step)
         coord.request_stop()
